@@ -1,0 +1,156 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+
+local eventFolder = ReplicatedStorage:WaitForChild("EventSystem")
+local adminAction = eventFolder:WaitForChild("AdminAction")
+local broadcastEvent = eventFolder:WaitForChild("BroadcastEvent")
+
+-- ตั้งค่าเบื้องต้น (เปลี่ยนเป็น true หากต้องการจำกัดเฉพาะเจ้าของ Place)
+local RESTRICT_TO_OWNER = false
+
+local autoHealEnabled = {} -- [UserId] = boolean
+local healthConnections = {} -- [UserId] = RBXScriptConnection
+
+local function isAuthorized(player: Player): boolean
+	if not RESTRICT_TO_OWNER then
+		return true
+	end
+	if game.CreatorType == Enum.CreatorType.User then
+		return player.UserId == game.CreatorId
+	end
+	return true
+end
+
+local function createBlast(position: Vector3, radius: number, damage: number, ownerCharacter: Model?)
+	local explosion = Instance.new("Explosion")
+	explosion.Position = position
+	explosion.BlastRadius = radius
+	explosion.BlastPressure = 500000
+	explosion.DestroyJointRadiusPercent = 0
+	explosion.Parent = workspace
+
+	-- คำนวณดาเมจโดยตรงให้แม่นยำตามค่าที่กำหนด
+	for _, model in ipairs(workspace:GetChildren()) do
+		if model:IsA("Model") and model ~= ownerCharacter then
+			local humanoid = model:FindFirstChildOfClass("Humanoid")
+			local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+			if humanoid and root and humanoid.Health > 0 then
+				local dist = (root.Position - position).Magnitude
+				if dist <= radius then
+					humanoid:TakeDamage(damage)
+				end
+			end
+		end
+	end
+
+	Debris:AddItem(explosion, 3)
+end
+
+local function bindAutoHeal(player: Player)
+	if healthConnections[player.UserId] then
+		healthConnections[player.UserId]:Disconnect()
+		healthConnections[player.UserId] = nil
+	end
+
+	local function hookCharacter(character: Model)
+		local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
+		if not humanoid then
+			return
+		end
+
+		if healthConnections[player.UserId] then
+			healthConnections[player.UserId]:Disconnect()
+		end
+
+		healthConnections[player.UserId] = humanoid.HealthChanged:Connect(function(newHealth)
+			if autoHealEnabled[player.UserId] and newHealth < humanoid.MaxHealth and humanoid.Health > 0 then
+				humanoid.Health = humanoid.MaxHealth
+			end
+		end)
+	end
+
+	if player.Character then
+		hookCharacter(player.Character)
+	end
+	player.CharacterAdded:Connect(hookCharacter)
+end
+
+Players.PlayerAdded:Connect(function(player)
+	autoHealEnabled[player.UserId] = false
+	bindAutoHeal(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	autoHealEnabled[player.UserId] = nil
+	if healthConnections[player.UserId] then
+		healthConnections[player.UserId]:Disconnect()
+		healthConnections[player.UserId] = nil
+	end
+end)
+
+adminAction.OnServerEvent:Connect(function(player: Player, actionType: string, payload: any)
+	if not isAuthorized(player) then
+		return
+	end
+
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid") :: Humanoid?
+
+	if actionType == "MeteorShower" and root then
+		broadcastEvent:FireAllClients("Banner", "meteor shower", Color3.fromRGB(255, 140, 40))
+
+		task.spawn(function()
+			local center = root.Position
+			local endTime = os.clock() + 10
+			while os.clock() < endTime do
+				local angle = math.random() * math.pi * 2
+				local dist = math.random(5, 65)
+				local dropPos = Vector3.new(
+					center.X + math.cos(angle) * dist,
+					center.Y,
+					center.Z + math.sin(angle) * dist
+				)
+
+				-- แจ้งให้ทุกไคลเอนต์สร้างเอฟเฟกต์ดาวตกตกลงมา
+				broadcastEvent:FireAllClients("MeteorVisual", dropPos)
+
+				task.delay(0.45, function()
+					createBlast(dropPos, 16, 500, character)
+				end)
+
+				task.wait(0.25)
+			end
+		end)
+
+	elseif actionType == "Supernova" and typeof(payload) == "Vector3" then
+		broadcastEvent:FireAllClients("Banner", "Supernova!", Color3.fromRGB(255, 215, 70))
+		broadcastEvent:FireAllClients("Cutscene", "Supernova", payload)
+
+		task.delay(1.1, function()
+			createBlast(payload, 75, 2000, character)
+		end)
+
+	elseif actionType == "ManualHeal" and humanoid then
+		humanoid.Health = humanoid.MaxHealth
+
+	elseif actionType == "ToggleAutoHeal" then
+		local state = not not payload
+		autoHealEnabled[player.UserId] = state
+		if state and humanoid and humanoid.Health > 0 then
+			humanoid.Health = humanoid.MaxHealth
+		end
+
+	elseif actionType == "SolarBeam" and typeof(payload) == "Vector3" then
+		broadcastEvent:FireAllClients("Banner", "The sun has arrived!", Color3.fromRGB(255, 185, 30))
+		broadcastEvent:FireAllClients("Cutscene", "SolarBeam", payload)
+
+		task.delay(0.9, function()
+			createBlast(payload, 55, 1000, character)
+		end)
+
+	elseif actionType == "DevAnnounce" then
+		broadcastEvent:FireAllClients("Banner", "The developers are already in the game!", Color3.fromRGB(120, 220, 255))
+	end
+end)
